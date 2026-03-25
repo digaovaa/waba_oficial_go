@@ -65,7 +65,7 @@ jobs:
 
           [server]
           host = "0.0.0.0"
-          port = 8080
+          port = 8181
           read_timeout = 30
           write_timeout = 30
           base_path = ""
@@ -117,7 +117,7 @@ jobs:
           ./whatomate server -migrate &
           sleep 10
           # Verify server is running
-          curl -f http://localhost:8080/health || exit 1
+          curl -f http://localhost:8181/health || exit 1
         env:
           WHATOMATE_CONFIG: config.toml
 
@@ -127,7 +127,7 @@ jobs:
       - name: Run E2E tests
         run: cd frontend && npm run test:e2e
         env:
-          BASE_URL: http://localhost:8080
+          BASE_URL: http://localhost:8181
           TEST_DATABASE_URL: postgres://test:test@127.0.0.1:5432/whatomate_test
           CI: true
 

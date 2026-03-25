@@ -59,7 +59,6 @@
     "all": "All",
     "none": "None",
     "other": "Other",
-    "required": "Required",
     "optional": "Optional",
     "default": "Default",
     "selected": "selected",

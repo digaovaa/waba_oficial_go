@@ -108,7 +108,7 @@ POST /api/messages/template
 **Using phone number (creates contact if needed):**
 
 ```bash
-curl -X POST "http://your-server:8080/api/messages/template" \
+curl -X POST "http://your-server:8181/api/messages/template" \
   -H "X-API-Key: whm_your_api_key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -229,7 +229,7 @@ POST /api/contacts/{id}/messages
 Send a message with up to 3 quick reply buttons:
 
 ```bash
-curl -X POST "http://your-server:8080/api/contacts/{contact_id}/messages" \
+curl -X POST "http://your-server:8181/api/contacts/{contact_id}/messages" \
   -H "X-API-Key: whm_your_api_key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -264,7 +264,7 @@ curl -X POST "http://your-server:8080/api/contacts/{contact_id}/messages" \
 Send a message with a call-to-action URL button:
 
 ```bash
-curl -X POST "http://your-server:8080/api/contacts/{contact_id}/messages" \
+curl -X POST "http://your-server:8181/api/contacts/{contact_id}/messages" \
   -H "X-API-Key: whm_your_api_key" \
   -H "Content-Type: application/json" \
   -d '{

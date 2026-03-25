@@ -73,7 +73,7 @@ cp config.example.toml config.toml
 docker compose up -d
 ```
 
-Go to `http://localhost:8080` and login with `admin@admin.com` / `admin`
+Go to `http://localhost:8181` and login with `admin@admin.com` / `admin`
 
 __________________
 
@@ -89,7 +89,7 @@ cp config.example.toml config.toml
 ./whatomate server -migrate
 ```
 
-Go to `http://localhost:8080` and login with `admin@admin.com` / `admin`
+Go to `http://localhost:8181` and login with `admin@admin.com` / `admin`
 
 __________________
 
@@ -122,7 +122,7 @@ The backend is written in Go ([Fastglue](https://github.com/zerodha/fastglue)) a
 
 ```bash
 # Development setup
-make run-migrate    # Backend (port 8080)
+make run-migrate    # Backend (port 8181)
 cd frontend && npm run dev   # Frontend (port 3000)
 ```
 

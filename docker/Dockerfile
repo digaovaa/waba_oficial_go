@@ -41,9 +41,9 @@ RUN wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/pipe
 # Download default English voice model (~60MB)
 RUN mkdir -p /tmp/piper-models \
     && wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx \
-       -O /tmp/piper-models/en_US-lessac-medium.onnx \
+    -O /tmp/piper-models/en_US-lessac-medium.onnx \
     && wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json \
-       -O /tmp/piper-models/en_US-lessac-medium.onnx.json
+    -O /tmp/piper-models/en_US-lessac-medium.onnx.json
 
 # Final stage (Debian for glibc — required by Piper TTS)
 FROM debian:bookworm-slim
@@ -75,7 +75,7 @@ COPY --from=piper-dl /tmp/piper-models /opt/piper/models
 RUN mkdir -p /app/uploads /app/audio
 
 # Expose port
-EXPOSE 8080
+EXPOSE 8181
 
 # Run the binary
 CMD ["./whatomate", "server", "-config", "config.toml", "-migrate"]

@@ -5,7 +5,7 @@ services:
     container_name: whatomate_app
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8181:8181"
     networks:
       - whatomate
     depends_on:

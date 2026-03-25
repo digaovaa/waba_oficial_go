@@ -2,7 +2,7 @@ import { test, expect, request as playwrightRequest } from '@playwright/test'
 import { TablePage, DialogPage } from '../../pages'
 import { loginAsAdmin, login, createUserFixture, ApiHelper } from '../../helpers'
 
-const BASE_URL = process.env.BASE_URL || 'http://localhost:8080'
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8181'
 
 test.describe('Users Management', () => {
   let tablePage: TablePage

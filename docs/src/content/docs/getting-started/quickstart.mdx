@@ -21,7 +21,7 @@ cp config.example.toml docker/config.toml
 make docker-up
 
 # Access the application
-open http://localhost:8080
+open http://localhost:8181
 ```
 
 **Default login:** `admin@admin.com` / `admin`
@@ -119,7 +119,7 @@ npm run dev
 | Service | URL |
 |---------|-----|
 | Frontend | http://localhost:3000 |
-| API | http://localhost:8080 |
+| API | http://localhost:8181 |
 
 **Login:** `admin@admin.com` / `admin`
 
@@ -136,7 +136,7 @@ make build-prod
 ./whatomate server -migrate
 ```
 
-This creates a self-contained binary—no separate frontend server needed. Access at http://localhost:8080.
+This creates a self-contained binary—no separate frontend server needed. Access at http://localhost:8181.
 
 ## 3rd Party Hosting
 
@@ -155,7 +155,7 @@ Template to start with a production ready instance!
 | `database does not exist` | Create it: `createdb whatomate` |
 | `permission denied` | Check database user/password in `config.toml` |
 | `port already in use` | Change port in `config.toml` or stop conflicting service |
-| Frontend can't reach API | Ensure backend is running on port 8080 |
+| Frontend can't reach API | Ensure backend is running on port 8181 |
 
 ## WhatsApp Configuration
 
