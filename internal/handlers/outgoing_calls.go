@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
+	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
 )
@@ -151,7 +154,8 @@ func (a *App) SendCallPermissionRequest(r *fastglue.Request) error {
 
 	// Send permission request via WhatsApp Messages API
 	ctx := r.RequestCtx
-	messageID, err := a.WhatsApp.SendCallPermissionRequest(ctx, waAccount, contact.PhoneNumber, "")
+	rcpt := whatsapp.Recipient{Phone: contact.PhoneNumber, BSUID: contact.BSUID}
+	messageID, err := a.WhatsApp.SendCallPermissionRequest(ctx, waAccount, rcpt, "")
 	if err != nil {
 		a.Log.Error("Failed to send call permission request", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to send permission request", nil, "")
@@ -191,12 +195,14 @@ func (a *App) GetICEServers(r *fastglue.Request) error {
 		Credential string   `json:"credential,omitempty"`
 	}
 
+	now := time.Now()
 	servers := make([]iceServer, 0, len(a.Config.Calling.ICEServers))
 	for _, s := range a.Config.Calling.ICEServers {
+		username, credential := s.ResolveCredentials(now)
 		servers = append(servers, iceServer{
 			URLs:       s.URLs,
-			Username:   s.Username,
-			Credential: s.Credential,
+			Username:   username,
+			Credential: credential,
 		})
 	}
 
@@ -254,4 +260,3 @@ func (a *App) GetCallPermission(r *fastglue.Request) error {
 		"status": status,
 	})
 }
-

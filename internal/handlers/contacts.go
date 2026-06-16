@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/audit"
 	"github.com/shridarpatil/whatomate/internal/models"
+	"github.com/shridarpatil/whatomate/internal/utils"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
+	"gorm.io/gorm"
 )
 
 // ContactResponse represents a contact with additional fields for the frontend
@@ -37,6 +40,7 @@ type ContactResponse struct {
 	WhatsAppAccount    string     `json:"whatsapp_account,omitempty"`
 	LastInboundAt      *time.Time `json:"last_inbound_at,omitempty"`
 	ServiceWindowOpen  bool       `json:"service_window_open"`
+	MarketingOptOut    bool       `json:"marketing_opt_out"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
@@ -96,9 +100,8 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 	query := a.ScopeToOrg(a.DB, userID, orgID)
 
 	// Users without contacts:read permission can only see contacts assigned to them
-	if !a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	// or contacts with an active chat transfer to them
+	query = a.scopeAssignedContact(query, userID, orgID)
 
 	if search != "" {
 		// Limit search string length to prevent abuse
@@ -166,8 +169,8 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 		phoneNumber := c.PhoneNumber
 		profileName := c.ProfileName
 		if shouldMask {
-			phoneNumber = MaskPhoneNumber(phoneNumber)
-			profileName = MaskIfPhoneNumber(profileName)
+			phoneNumber = utils.MaskPhoneNumber(phoneNumber)
+			profileName = utils.MaskIfPhoneNumber(profileName)
 		}
 
 		serviceWindowOpen := c.LastInboundAt != nil && time.Since(*c.LastInboundAt) < 24*time.Hour
@@ -187,6 +190,7 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 			WhatsAppAccount:    c.WhatsAppAccount,
 			LastInboundAt:      c.LastInboundAt,
 			ServiceWindowOpen:  serviceWindowOpen,
+			MarketingOptOut:    c.MarketingOptOut,
 			CreatedAt:          c.CreatedAt,
 			UpdatedAt:          c.UpdatedAt,
 		}
@@ -198,6 +202,25 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 		"page":     pg.Page,
 		"limit":    pg.Limit,
 	})
+}
+
+// scopeAssignedContact narrows a contact query for users who lack the
+// contacts:read permission: they may only access contacts assigned to them
+// (assigned_user_id) or contacts with an active agent transfer to them. With
+// the permission, the query is returned unchanged. Keeping this in one place
+// ensures every contact endpoint enforces the same visibility — assignment
+// via an active transfer counts even when assigned_user_id is unset (which it
+// is unless the AssignToSameAgent setting is on).
+func (a *App) scopeAssignedContact(query *gorm.DB, userID, orgID uuid.UUID) *gorm.DB {
+	if a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
+		return query
+	}
+	return query.Where("assigned_user_id = ? OR id IN (?)",
+		userID,
+		a.DB.Model(&models.AgentTransfer{}).
+			Select("contact_id").
+			Where("agent_id = ? AND organization_id = ? AND status = ?", userID, orgID, models.TransferStatusActive),
+	)
 }
 
 // GetContact returns a single contact
@@ -216,9 +239,8 @@ func (a *App) GetContact(r *fastglue.Request) error {
 	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
 
 	// Users without contacts:read permission can only access their assigned contacts
-	if !a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	// or contacts with an active chat transfer to them
+	query = a.scopeAssignedContact(query, userID, orgID)
 
 	if err := query.First(&contact).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
@@ -243,8 +265,8 @@ func (a *App) GetContact(r *fastglue.Request) error {
 	profileName := contact.ProfileName
 	shouldMask := a.ShouldMaskPhoneNumbers(orgID)
 	if shouldMask {
-		phoneNumber = MaskPhoneNumber(phoneNumber)
-		profileName = MaskIfPhoneNumber(profileName)
+		phoneNumber = utils.MaskPhoneNumber(phoneNumber)
+		profileName = utils.MaskIfPhoneNumber(profileName)
 	}
 
 	response := ContactResponse{
@@ -260,6 +282,7 @@ func (a *App) GetContact(r *fastglue.Request) error {
 		UnreadCount:        int(unreadCount),
 		AssignedUserID:     contact.AssignedUserID,
 		WhatsAppAccount:    contact.WhatsAppAccount,
+		MarketingOptOut:    contact.MarketingOptOut,
 		CreatedAt:          contact.CreatedAt,
 		UpdatedAt:          contact.UpdatedAt,
 	}
@@ -285,9 +308,7 @@ func (a *App) GetMessages(r *fastglue.Request) error {
 	// Verify contact belongs to org (and to user if no contacts:read permission)
 	var contact models.Contact
 	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
-	if !hasContactsReadPermission {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	query = a.scopeAssignedContact(query, userID, orgID)
 	if err := query.First(&contact).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
 	}
@@ -440,9 +461,9 @@ func (a *App) buildMessagesResponse(messages []models.Message) []MessageResponse
 
 		if m.Metadata != nil {
 			if reactionsRaw, ok := m.Metadata["reactions"]; ok {
-				if reactionsArray, ok := reactionsRaw.([]interface{}); ok {
+				if reactionsArray, ok := reactionsRaw.([]any); ok {
 					for _, r := range reactionsArray {
-						if rMap, ok := r.(map[string]interface{}); ok {
+						if rMap, ok := r.(map[string]any); ok {
 							emoji, _ := rMap["emoji"].(string)
 							fromPhone, _ := rMap["from_phone"].(string)
 							fromUser, _ := rMap["from_user"].(string)
@@ -460,6 +481,30 @@ func (a *App) buildMessagesResponse(messages []models.Message) []MessageResponse
 		response[i] = msgResp
 	}
 	return response
+}
+
+// MarkContactRead marks all incoming messages from a contact as read.
+// Called from the frontend when a new message arrives for the chat the
+// user is currently viewing, so the sidebar unread badge stays at zero.
+func (a *App) MarkContactRead(r *fastglue.Request) error {
+	orgID, userID, err := a.getOrgAndUserID(r)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+	}
+	contactID, err := parsePathUUID(r, "id", "contact")
+	if err != nil {
+		return nil
+	}
+
+	var contact models.Contact
+	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
+	query = a.scopeAssignedContact(query, userID, orgID)
+	if err := query.First(&contact).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
+	}
+
+	a.markMessagesAsRead(orgID, contactID, &contact)
+	return r.SendEnvelope(map[string]any{"status": "ok"})
 }
 
 // markMessagesAsRead marks messages as read and sends read receipts
@@ -518,11 +563,22 @@ type SendMessageRequest struct {
 
 // InteractiveContent holds interactive message data
 type InteractiveContent struct {
-	Type       string           `json:"type"`                  // "button", "list", "cta_url"
-	Body       string           `json:"body"`                  // Body text
-	Buttons    []ButtonContent  `json:"buttons,omitempty"`     // For button type
-	ButtonText string           `json:"button_text,omitempty"` // For cta_url type
-	URL        string           `json:"url,omitempty"`         // For cta_url type
+	Type       string          `json:"type"`                  // "button", "list", "cta_url", "voice_call", "flow"
+	Body       string          `json:"body"`                  // Body text
+	Buttons    []ButtonContent `json:"buttons,omitempty"`     // For button type
+	ButtonText string          `json:"button_text,omitempty"` // CTA label for cta_url and flow
+	URL        string          `json:"url,omitempty"`         // For cta_url type
+	// voice_call only: button face label and clickable TTL.
+	// The payload (round-trip opaque string Meta echoes back on the incoming-
+	// call webhook) is set server-side from the auth context — never from the
+	// request body — to prevent agent-id spoofing.
+	DisplayText string `json:"display_text,omitempty"`
+	TTLMinutes  int    `json:"ttl_minutes,omitempty"`
+	// flow only: the Meta flow to launch, an optional first screen, and an
+	// optional header. Body holds the message text, ButtonText the CTA label.
+	FlowID      string `json:"flow_id,omitempty"`
+	FirstScreen string `json:"first_screen,omitempty"`
+	Header      string `json:"header,omitempty"`
 }
 
 // ButtonContent represents a button in interactive messages
@@ -552,9 +608,7 @@ func (a *App) SendMessage(r *fastglue.Request) error {
 	// Get contact (users without full read permission can only message their assigned contacts)
 	var contact models.Contact
 	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
-	if !a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	query = a.scopeAssignedContact(query, userID, orgID)
 	if err := query.First(&contact).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
 	}
@@ -607,6 +661,53 @@ func (a *App) SendMessage(r *fastglue.Request) error {
 				}
 			}
 		}
+
+		if req.Interactive.Type == "flow" {
+			if req.Interactive.FlowID == "" {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "flow_id is required to send a flow", nil, "")
+			}
+			// Ensure the flow belongs to this org so an agent can't send another
+			// org's flow by supplying its Meta id.
+			var waFlow models.WhatsAppFlow
+			if err := a.DB.Where("meta_flow_id = ? AND organization_id = ?", req.Interactive.FlowID, orgID).First(&waFlow).Error; err != nil {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Flow not found for this organization", nil, "")
+			}
+			cta := req.Interactive.ButtonText
+			if cta == "" {
+				cta = "Open"
+			}
+			body := req.Interactive.Body
+			if body == "" {
+				body = req.Content.Body
+			}
+			msgReq.Type = models.MessageTypeFlow
+			msgReq.FlowID = req.Interactive.FlowID
+			msgReq.FlowCTA = cta
+			msgReq.FlowHeader = req.Interactive.Header
+			msgReq.FlowFirstScreen = req.Interactive.FirstScreen
+			msgReq.BodyText = body
+			msgReq.FlowToken = fmt.Sprintf("agent_%s_%d", contact.ID, time.Now().UnixNano())
+		}
+
+		if req.Interactive.Type == "voice_call" {
+			if !account.BusinessCallingEnabled {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest,
+					"This WhatsApp account is not enrolled in the Business Calling API. Enable it under Settings → Accounts before sending Call buttons.",
+					nil, "")
+			}
+			msgReq.DisplayText = req.Interactive.DisplayText
+			msgReq.TTLMinutes = req.Interactive.TTLMinutes
+			// Stamp the payload server-side so the incoming-call webhook can
+			// sticky-route the resulting call back to the agent who sent it.
+			// Never trust a client-supplied payload — would let any agent
+			// impersonate any other.
+			msgReq.VoiceCallPayload = "agent:" + userID.String()
+			// Pre-register the sticky-routing intent in Redis so that the
+			// resulting incoming-call webhook can resolve the originating
+			// agent in O(1) (Meta does not currently echo the payload).
+			// TTL matches the button's clickable lifetime.
+			a.MarkPendingStickyCall(context.Background(), orgID, contact.PhoneNumber, userID, req.Interactive.TTLMinutes)
+		}
 	}
 
 	opts := DefaultSendOptions()
@@ -615,6 +716,7 @@ func (a *App) SendMessage(r *fastglue.Request) error {
 	ctx := context.Background()
 	message, err := a.SendOutgoingMessage(ctx, msgReq, opts)
 	if err != nil {
+		a.Log.Error("Failed to send message", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to send message", nil, "")
 	}
 
@@ -746,6 +848,7 @@ func (a *App) SendMediaMessage(r *fastglue.Request) error {
 	// Read file data
 	fileData, err := io.ReadAll(file)
 	if err != nil {
+		a.Log.Error("Failed to read file data", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to read file data", nil, "")
 	}
 
@@ -758,9 +861,7 @@ func (a *App) SendMediaMessage(r *fastglue.Request) error {
 	// Get contact (users without full read permission can only message their assigned contacts)
 	var contact models.Contact
 	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
-	if !a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	query = a.scopeAssignedContact(query, userID, orgID)
 	if err := query.First(&contact).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
 	}
@@ -800,6 +901,7 @@ func (a *App) SendMediaMessage(r *fastglue.Request) error {
 	ctx := context.Background()
 	message, err := a.SendOutgoingMessage(ctx, msgReq, opts)
 	if err != nil {
+		a.Log.Error("Failed to send message", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to send message", nil, "")
 	}
 
@@ -900,9 +1002,7 @@ func (a *App) SendReaction(r *fastglue.Request) error {
 	// Get contact (users without full read permission can only react to messages in their assigned contacts)
 	var contact models.Contact
 	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
-	if !a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	query = a.scopeAssignedContact(query, userID, orgID)
 	if err := query.First(&contact).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
 	}
@@ -924,11 +1024,11 @@ func (a *App) SendReaction(r *fastglue.Request) error {
 	}
 
 	// Parse existing reactions from Metadata
-	var metadata map[string]interface{}
+	var metadata map[string]any
 	if message.Metadata != nil {
 		metadata = message.Metadata
 	} else {
-		metadata = make(map[string]interface{})
+		metadata = make(map[string]any)
 	}
 
 	// Get or initialize reactions array
@@ -939,9 +1039,9 @@ func (a *App) SendReaction(r *fastglue.Request) error {
 	}
 	var reactions []Reaction
 	if reactionsRaw, ok := metadata["reactions"]; ok {
-		if reactionsArray, ok := reactionsRaw.([]interface{}); ok {
+		if reactionsArray, ok := reactionsRaw.([]any); ok {
 			for _, r := range reactionsArray {
-				if rMap, ok := r.(map[string]interface{}); ok {
+				if rMap, ok := r.(map[string]any); ok {
 					emoji, _ := rMap["emoji"].(string)
 					fromPhone, _ := rMap["from_phone"].(string)
 					fromUser, _ := rMap["from_user"].(string)
@@ -1120,9 +1220,7 @@ func (a *App) GetContactSessionData(r *fastglue.Request) error {
 	// Verify contact belongs to org (users without full read permission can only access assigned contacts)
 	var contact models.Contact
 	query := a.DB.Where("id = ? AND organization_id = ?", contactID, orgID)
-	if !a.HasPermission(userID, models.ResourceContacts, models.ActionRead, orgID) {
-		query = query.Where("assigned_user_id = ?", userID)
-	}
+	query = a.scopeAssignedContact(query, userID, orgID)
 	if err := query.First(&contact).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Contact not found", nil, "")
 	}
@@ -1362,16 +1460,22 @@ func (a *App) CreateContact(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create contact", nil, "")
 	}
 
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"contact", contact.ID, models.AuditActionCreated, nil, &contact)
+
 	return r.SendEnvelope(a.buildContactResponse(&contact, orgID))
 }
 
-// UpdateContactRequest represents the request body for updating a contact
+// UpdateContactRequest represents the request body for updating a contact.
+// AssignedUserID uses *string so we can distinguish "not sent" (nil) from
+// "sent as null" (pointer to empty string) to allow clearing the field.
 type UpdateContactRequest struct {
-	ProfileName     *string         `json:"profile_name"`
-	WhatsAppAccount *string         `json:"whatsapp_account"`
-	Tags            []string        `json:"tags"`
-	Metadata        *map[string]any `json:"metadata"`
-	AssignedUserID  *uuid.UUID      `json:"assigned_user_id"`
+	ProfileName        *string         `json:"profile_name"`
+	WhatsAppAccount    *string         `json:"whatsapp_account"`
+	Tags               []string        `json:"tags"`
+	Metadata           *map[string]any `json:"metadata"`
+	AssignedUserID     *uuid.UUID      `json:"assigned_user_id"`
+	ClearAssignedAgent *bool           `json:"clear_assigned_agent"`
 }
 
 // UpdateContact updates an existing contact
@@ -1401,6 +1505,7 @@ func (a *App) UpdateContact(r *fastglue.Request) error {
 	if err != nil {
 		return nil
 	}
+	oldContact := *contact
 
 	// Build updates map
 	updates := map[string]any{}
@@ -1421,8 +1526,9 @@ func (a *App) UpdateContact(r *fastglue.Request) error {
 	if req.Metadata != nil {
 		updates["metadata"] = models.JSONB(*req.Metadata)
 	}
-	if req.AssignedUserID != nil {
-		// Verify user exists in same org
+	if req.ClearAssignedAgent != nil && *req.ClearAssignedAgent {
+		updates["assigned_user_id"] = nil
+	} else if req.AssignedUserID != nil {
 		var user models.User
 		if err := a.DB.Where("id = ? AND organization_id = ?", req.AssignedUserID, orgID).First(&user).Error; err != nil {
 			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Assigned user not found", nil, "")
@@ -1441,6 +1547,9 @@ func (a *App) UpdateContact(r *fastglue.Request) error {
 
 	// Reload contact
 	a.DB.First(contact, contactID)
+
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"contact", contact.ID, models.AuditActionUpdated, &oldContact, contact)
 
 	return r.SendEnvelope(a.buildContactResponse(contact, orgID))
 }
@@ -1474,6 +1583,9 @@ func (a *App) DeleteContact(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete contact", nil, "")
 	}
 
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"contact", contactID, models.AuditActionDeleted, contact, nil)
+
 	return r.SendEnvelope(map[string]any{
 		"message": "Contact deleted successfully",
 	})
@@ -1500,8 +1612,8 @@ func (a *App) buildContactResponse(contact *models.Contact, orgID uuid.UUID) Con
 	profileName := contact.ProfileName
 	shouldMask := a.ShouldMaskPhoneNumbers(orgID)
 	if shouldMask {
-		phoneNumber = MaskPhoneNumber(phoneNumber)
-		profileName = MaskIfPhoneNumber(profileName)
+		phoneNumber = utils.MaskPhoneNumber(phoneNumber)
+		profileName = utils.MaskIfPhoneNumber(profileName)
 	}
 
 	// 24-hour service window: open if customer messaged within the last 24 hours.
@@ -1522,6 +1634,7 @@ func (a *App) buildContactResponse(contact *models.Contact, orgID uuid.UUID) Con
 		WhatsAppAccount:    contact.WhatsAppAccount,
 		LastInboundAt:      contact.LastInboundAt,
 		ServiceWindowOpen:  serviceWindowOpen,
+		MarketingOptOut:    contact.MarketingOptOut,
 		CreatedAt:          contact.CreatedAt,
 		UpdatedAt:          contact.UpdatedAt,
 	}

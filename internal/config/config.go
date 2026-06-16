@@ -1,29 +1,34 @@
 package config
 
 import (
+	"crypto/hmac"
+	"crypto/sha1" //nolint:gosec // SHA-1 is mandated by the coturn TURN REST API (RFC draft)
+	"encoding/base64"
+	"strconv"
 	"strings"
+	"time"
 
-	"github.com/knadh/koanf/v2"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/v2"
 )
 
 // Config holds all configuration for the application
 type Config struct {
-	App           AppConfig           `koanf:"app"`
-	Server        ServerConfig        `koanf:"server"`
-	Database      DatabaseConfig      `koanf:"database"`
-	Redis         RedisConfig         `koanf:"redis"`
-	JWT           JWTConfig           `koanf:"jwt"`
-	WhatsApp      WhatsAppConfig      `koanf:"whatsapp"`
-	AI            AIConfig            `koanf:"ai"`
-	Storage       StorageConfig       `koanf:"storage"`
-	DefaultAdmin  DefaultAdminConfig  `koanf:"default_admin"`
-	RateLimit     RateLimitConfig     `koanf:"rate_limit"`
-	Cookie        CookieConfig        `koanf:"cookie"`
-	Calling       CallingConfig       `koanf:"calling"`
-	TTS           TTSConfig           `koanf:"tts"`
+	App          AppConfig          `koanf:"app"`
+	Server       ServerConfig       `koanf:"server"`
+	Database     DatabaseConfig     `koanf:"database"`
+	Redis        RedisConfig        `koanf:"redis"`
+	JWT          JWTConfig          `koanf:"jwt"`
+	WhatsApp     WhatsAppConfig     `koanf:"whatsapp"`
+	AI           AIConfig           `koanf:"ai"`
+	Storage      StorageConfig      `koanf:"storage"`
+	DefaultAdmin DefaultAdminConfig `koanf:"default_admin"`
+	RateLimit    RateLimitConfig    `koanf:"rate_limit"`
+	Cookie       CookieConfig       `koanf:"cookie"`
+	Calling      CallingConfig      `koanf:"calling"`
+	TTS          TTSConfig          `koanf:"tts"`
 }
 
 type TTSConfig struct {
@@ -32,24 +37,64 @@ type TTSConfig struct {
 	OpusencBinary string `koanf:"opusenc_binary"` // path to opusenc (defaults to "opusenc")
 }
 
+// defaultTURNCredentialTTLSecs is the lifetime of generated coturn REST
+// credentials when an ICE server has a secret but no explicit credential_ttl.
+const defaultTURNCredentialTTLSecs = 86400 // 24h
+
 type ICEServerConfig struct {
 	URLs       []string `koanf:"urls"`
 	Username   string   `koanf:"username"`
 	Credential string   `koanf:"credential"`
+	// Secret enables coturn's "use-auth-secret" (TURN REST API) mode. When set,
+	// short-lived credentials are generated per request instead of using the
+	// static Username/Credential above.
+	Secret string `koanf:"secret"`
+	// CredentialTTL is the lifetime (seconds) of generated credentials. Defaults
+	// to defaultTURNCredentialTTLSecs when <= 0. Only used when Secret is set.
+	CredentialTTL int `koanf:"credential_ttl"`
+}
+
+// ResolveCredentials returns the username and credential to advertise for this
+// ICE server. When Secret is set it derives short-lived coturn REST credentials
+// (use-auth-secret): the username is "<expiry-unix>" — optionally prefixed onto
+// any configured Username as "<expiry-unix>:<username>" — and the credential is
+// the base64-encoded HMAC-SHA1 of that username keyed by the secret. When Secret
+// is empty, the static Username/Credential are returned unchanged.
+func (s ICEServerConfig) ResolveCredentials(now time.Time) (username, credential string) {
+	if s.Secret == "" {
+		return s.Username, s.Credential
+	}
+
+	ttl := s.CredentialTTL
+	if ttl <= 0 {
+		ttl = defaultTURNCredentialTTLSecs
+	}
+
+	expiry := now.Add(time.Duration(ttl) * time.Second).Unix()
+	username = strconv.FormatInt(expiry, 10)
+	if s.Username != "" {
+		username = username + ":" + s.Username
+	}
+
+	mac := hmac.New(sha1.New, []byte(s.Secret))
+	mac.Write([]byte(username))
+	credential = base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	return username, credential
 }
 
 type CallingConfig struct {
-	MaxCallDuration     int              `koanf:"max_call_duration"`
-	AudioDir            string           `koanf:"audio_dir"`
-	HoldMusicFile       string           `koanf:"hold_music_file"`
-	TransferTimeoutSecs int              `koanf:"transfer_timeout_secs"`
-	RingbackFile        string           `koanf:"ringback_file"`
-	UDPPortMin          uint16           `koanf:"udp_port_min"`  // WebRTC UDP port range start (default: 10000)
-	UDPPortMax          uint16           `koanf:"udp_port_max"`  // WebRTC UDP port range end (default: 10100)
-	PublicIP            string           `koanf:"public_ip"`     // Public IP for NAT mapping (required on AWS/cloud)
-	RelayOnly           bool             `koanf:"relay_only"`    // Force all media through TURN relay (no direct UDP)
+	MaxCallDuration     int               `koanf:"max_call_duration"`
+	AudioDir            string            `koanf:"audio_dir"`
+	HoldMusicFile       string            `koanf:"hold_music_file"`
+	TransferTimeoutSecs int               `koanf:"transfer_timeout_secs"`
+	PerAgentTimeoutSecs int               `koanf:"per_agent_timeout_secs"`
+	RingbackFile        string            `koanf:"ringback_file"`
+	UDPPortMin          uint16            `koanf:"udp_port_min"` // WebRTC UDP port range start (default: 10000)
+	UDPPortMax          uint16            `koanf:"udp_port_max"` // WebRTC UDP port range end (default: 10100)
+	PublicIP            string            `koanf:"public_ip"`    // Public IP for NAT mapping (required on AWS/cloud)
+	RelayOnly           bool              `koanf:"relay_only"`   // Force all media through TURN relay (no direct UDP)
 	ICEServers          []ICEServerConfig `koanf:"ice_servers"`
-	RecordingEnabled    bool             `koanf:"recording_enabled"` // Enable call recording to S3
+	RecordingEnabled    bool              `koanf:"recording_enabled"` // Enable call recording to S3
 }
 
 type AppConfig struct {
@@ -65,7 +110,7 @@ type ServerConfig struct {
 	ReadTimeout    int    `koanf:"read_timeout"`
 	WriteTimeout   int    `koanf:"write_timeout"`
 	BasePath       string `koanf:"base_path"`       // Base path for frontend (e.g., "/whatomate" for proxy pass)
-	AllowedOrigins string `koanf:"allowed_origins"`  // Comma-separated list of allowed CORS origins
+	AllowedOrigins string `koanf:"allowed_origins"` // Comma-separated list of allowed CORS origins
 }
 
 type DatabaseConfig struct {
@@ -83,20 +128,25 @@ type DatabaseConfig struct {
 type RedisConfig struct {
 	Host     string `koanf:"host"`
 	Port     int    `koanf:"port"`
+	Username string `koanf:"username"`
 	Password string `koanf:"password"`
 	DB       int    `koanf:"db"`
+	TLS      bool   `koanf:"tls"`
 }
 
 type JWTConfig struct {
-	Secret           string `koanf:"secret"`
-	AccessExpiryMins int    `koanf:"access_expiry_mins"`
-	RefreshExpiryDays int   `koanf:"refresh_expiry_days"`
+	Secret            string `koanf:"secret"`
+	AccessExpiryMins  int    `koanf:"access_expiry_mins"`
+	RefreshExpiryDays int    `koanf:"refresh_expiry_days"`
 }
 
 type WhatsAppConfig struct {
 	WebhookVerifyToken string `koanf:"webhook_verify_token"`
 	APIVersion         string `koanf:"api_version"`
 	BaseURL            string `koanf:"base_url"` // Meta Graph API base URL
+	AppID              string `koanf:"app_id"`   // WhatsApp App ID for frontend
+	AppSecret          string `koanf:"app_secret"`
+	ConfigID           string `koanf:"config_id"` // WhatsApp Config ID for frontend
 }
 
 type AIConfig struct {
@@ -133,6 +183,8 @@ type RateLimitConfig struct {
 	SSOMaxAttempts      int  `koanf:"sso_max_attempts"`
 	WindowSeconds       int  `koanf:"window_seconds"`
 	TrustProxy          bool `koanf:"trust_proxy"`
+	APIMaxRequests      int  `koanf:"api_max_requests"`
+	APIWindowSeconds    int  `koanf:"api_window_seconds"`
 }
 
 // Load loads configuration from file and environment variables
